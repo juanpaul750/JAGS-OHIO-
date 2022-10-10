@@ -1,0 +1,565 @@
+```{r echo=T,eval=T,warning=FALSE,message=FALSE}
+
+library(R2jags)
+library(MCMCvis)
+library(coda)
+library(lattice)
+library(tidyverse)
+library(maps)
+library(ggplot2)
+library(caret)
+library(class) 
+library(ggplot2)
+library(kernlab)
+library(tidyverse)
+library(knitr)
+library(naniar)
+library(randomForest)
+library(C50)
+library(MASS)
+library(e1071)
+data_ohio = read.csv("Ohio_Data.csv")
+
+```
+
+```{r echo=T,eval=T,warning=FALSE,message=FALSE}
+df = summary(data_ohio)
+kable(df,"simple", caption = "Ohio data summary")
+```
+
+&nbsp;
+
+In the dataset Ohio_Data, we observe the number of lung cancer and the expected number of lung cancer for 88 counties in Ohio in 1988. It is observed from the summary that some counties have large observed and expected lung cancer counts indicating uneven number of cases in each county. This may be due to difference in population of each county. The data set does not have any missing values.
+
+&nbsp;
+
+```{r echo=T,eval=T,warning=FALSE,message=FALSE}
+df = data.frame(SMR = data_ohio$Obs/data_ohio$Exp)
+kable(summary(df))
+```
+The observed number of death or disease can be compared to the expected number using Standard mortality rate (SMR). We compare this by dividing the observed number of diseases with the expected number of diseases.
+
+&nbsp;
+
+```{r echo=T,eval=T,warning=FALSE,message=FALSE}
+
+# DISTRIBUTION OF SMR
+ggplot(df) +
+ aes(x = SMR) +
+ geom_density(adjust = 1L, fill = "lightblue") +
+  labs(title = 'SMR DENSITY', y = 'Density') +
+ theme_minimal()
+
+```
+From the density plot we observe that most of the SMR is bellow 1. This means we usually observe less lung cancer than we expect.
+
+&nbsp;
+
+
+```{r echo=T,eval=T,warning=FALSE,message=FALSE}
+
+# MAP OF SMR
+source("OhioMap.R") # need to read in the OhioMap function
+OhioMap(df$SMR,ncol=8,type="e",figmain="Ohio SMR",lower=0,upper=1.6)
+
+```
+
+From the plot we observe that the county Marion,Pike and Meigs have high SMR, these counties have almost 1.4 times more lung cancer than expected. Most of the other counties observe lower SMR with the lowest seen at Union county.
+
+
+When building a model for the observed value we offset it on the expected number of lung cancer. This is because each county has a large variation in the number of lung cancer cases from each other. This may be due to a difference in population. To directly compare these counties we are providing an offset. For this, we adjust the mean of the Poisson distribution. Instead of modelling the count of observed lung cancer, we model the mean rate of occurrence by using the product of a known quantity Exp(expected count) and rate theta.
+
+$$\mu = Exp * \rho $$
+$$log(\mu) = log(Exp)+ log(\rho) $$
+$$log(\rho) = \beta_o + \beta_i(x_i) $$
+$$log(\theta_i) = \beta_i(x_i)$$
+Theta gives us explanatory variables and their covariates and Beta Zero is the intercept. Relative risk RR is used to compare events occurring between groups. Here the RR for each county can be calculated from an equation with the explanatory variable and its covariates (theta). It changes directly with a change in the explanatory variable and its covariates (theta) and changes exponentialy with intercept (beta zero).
+
+&nbsp;
+
+(iii)
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+
+#FUNCTION :
+ohio_Mortality <- function(){
+  b0 ~ dunif(-100,100) # prior
+  alph ~ dgamma(1,1) # prior
+  for(i in 1:N){
+  theta[i] ~ dgamma(alph,alph)
+  Obs[i] ~ dpois(mu[i]) # likelihood
+  log(mu[i]) <- log(Exp[i])+ b0 + log(theta[i]) # prediction
+  RR[i] <- exp(b0)*theta[i]
+  }
+}
+
+# Data:
+Exp = data_ohio$Exp
+Obs = data_ohio$Obs
+N = 88
+
+ohio_model_data = list('Exp','Obs','N')
+
+# INITIAL VALUES
+inits1 <- list( 'alph' =0.9, 'b0' = 0.005) # chain 1
+inits2 <- list('alph' = 1.1, 'b0' = 0.004) # chain 2 
+int_ohio_par <- list(inits1,inits2)
+
+#PARAMETERS OF INTREST
+param <- c('RR','alph','b0','mu','theta')
+
+
+# MODEL
+ohio_model  <-  jags(data = ohio_model_data,
+                inits = int_ohio_par,
+                n.iter = 12000,
+                parameters.to.save = param,
+                model.file = ohio_Mortality,
+                n.burnin = 6000,
+                n.chains=2,n.thin=1)
+
+```
+We build a jags model for the Ohio dataset to predict the observed value and relative risk for each county. We use a flat prior or uniform prior for Beta zero which means that the MLE coincides with the maximum posterior probability and the prior has no effect on likelihood. The prior alph comes from a Gamma(1,1) distribution which is exponential with a mean of 1. Then we have the likelihood obs[i] to which we pass the observed data. log(mu[i]) is the regression model with offset. The Relative risk RR depends on theta. Here log in log(mu) is a link function used to connect the positive mean observed count with the regression model which is linear in the betas.
+
+&nbsp;
+
+To monitor convergence we are using 2 chains. If the chains can't be distinguished then we assume convergence. For this purpose, we have two initial values. The initial values for the priors 'Alph' and 'beta 0' are provided based on likely values in the prior distribution. Then we create a list of all parameters we want to monitor. 'Obs' even though is a stochastic node it is not a parameter we want to monitor as it is the data itself. We monitor prior even though it comes from known given distribution as it will be updated by the likelihood to a posterior. We then build a model which generates 12000 samples and remove the first 6000 samples as burn-in.
+
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+#TRACE PLOT:
+mcmc_ohio <- as.mcmc(ohio_model)
+
+MCMCtrace(mcmc_ohio,
+          params = c('theta\\[2\\]','RR\\[2\\]','RR\\[40\\]','RR\\[88\\]',
+                     'b0','alph','mu\\[2\\]','mu\\[40\\]','mu\\[80\\]'),#param intrest
+          type = 'trace', # trace plot
+          ind = TRUE,     # separate density lines for each chain
+          pdf = FALSE, ISB = FALSE,
+          exact=FALSE)
+
+MCMCtrace(mcmc_ohio,
+          params = c('theta\\[2\\]','RR\\[2\\]','RR\\[40\\]','RR\\[88\\]',
+                     'b0','alph','mu\\[2\\]','mu\\[40\\]','mu\\[80\\]'),#param intrest
+          type = 'density', # trace plot
+          ind = TRUE,     # separate density lines for each chain
+          pdf = FALSE, ISB = FALSE,
+          exact=FALSE)
+
+```
+&nbsp;
+
+From the trace plot, we observe that the two chains have similar behavior for all parameters even though different initial points are provided therefore we can assume convergence. 
+
+
+```{r echo= F,eval=TRUE,warning=FALSE,message=FALSE}
+
+mcmc_ohio <- as.mcmc(ohio_model)
+# Gelman Check:
+gelman_df = gelman.diag(mcmc_ohio,multivariate = F)
+
+
+gelman_df$psrf[1:2,]
+gelman_df$psrf[c(4,13),]
+gelman_df$psrf[c(92,101,151),]
+gelman_df$psrf[c(208,257,256),]
+```
+&nbsp;
+
+To make sure that the parameters converge we look at 'Gelman.diag' it gives us the upper limit for scale reduction. This is calculated from within and between variance of the two chains. The upper C. I should be less than 1.1 and here from the table, we observe the same. All parameters have upper C. I less than 1.1. Looking at both the trace plots and 'gelmans.diag' we deduce that the parameters are converged. Now we can look at the summary of the model.  
+
+```{r echo= F,eval=TRUE,warning=FALSE,message=FALSE}
+
+ohio_model$BUGSoutput$summary[1:5,]
+ohio_model$BUGSoutput$summary[89:90,]
+ohio_model$BUGSoutput$summary[92:94,]
+ohio_model$BUGSoutput$summary[180:182,]
+```
+
+From the summary of the model, we get the estimated Relative risk and predicted mean of observed lung cancer. We also get the point estimate of the mean of the distribution for all the parameters (mean in the table) is extracted. We also get the standard deviation along with quantiles. From the summary, we can easily get the credible interval for each parameter. The credible interval for theta does not contain any zero which shows that it has a relavent influence on the mean with probability 95%(CI 2.5 to 97.25).
+
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+
+# POSTERIOR RR PLOT
+RR_posterior = ohio_model$BUGSoutput$summary[1:88,1]
+
+source("OhioMap.R")
+# need to read in the OhioMap function
+OhioMap(RR_posterior,ncol=8,type="e",figmain="Ohio Relative Risk Posterior Plot",lower=0,upper=1.5)
+
+```
+
+From the figure we see that regions with highest relative risks is Marion. we also see other counties with great relative risk shaded in dark color.
+
+
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+
+# POSTERIOR PROB OF RR> 1.2
+ohio_Mortality <- function(){
+  b0 ~ dunif(-100,100)
+  alph ~ dgamma(1,1)
+  for(i in 1:N){
+    Obs[i] ~ dpois(mu[i])
+    log(mu[i]) <- log(Exp[i])+ b0 + log(theta[i])
+    theta[i] ~ dgamma(alph,alph)
+    RR[i] <- exp(b0)*theta[i]
+    P.RR[i] <- ifelse(RR[i] > 1.2 ,1,0) # probability of interest
+  }
+}
+
+param <- c('P.RR')
+
+ohio_model_prob    <- jags(data = ohio_model_data,
+                      inits = int_ohio_par,
+                      n.iter = 12000,
+                      parameters.to.save = param,
+                      model.file = ohio_Mortality,
+                      n.burnin = 6000,
+                      n.chains=2,n.thin=1)
+#print(ohio_model)
+
+#PROB RR> 1.2 PLOT
+P.RR_posterior = ohio_model_prob$BUGSoutput$summary[1:88,1]
+
+source("OhioMap.R")
+testdat <- runif(88) # need to read in the OhioMap function
+OhioMap(P.RR_posterior,ncol=8,type="e",figmain="Ohio Relative Risk Posterior greater than 1.2",lower=0,upper=1)
+
+```
+We want to find the probability that relative risk in each region exceed 1.2. For this We modify the model to account for the probability of interest. When we map it we see regions with high probability of  relative risk greater than 1.2. The county Marion has the highest probability with 88 percent probability that the county has relative risk greater than 1.2.
+
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+
+
+ohio_Mortality_pd <- function(){
+  b0 ~ dnorm(-0.04,0.01) # informative prior:
+  alph ~ dgamma(0.001,0.001) # vauge prior
+  for(i in 1:N){
+    Obs[i] ~ dpois(mu[i])
+    log(mu[i]) <- log(Exp[i])+ b0 + log(theta[i])
+    theta[i] ~ dgamma(alph,alph)
+    RR[i] <- exp(b0)*theta[i]
+    P.RR[i] <- ifelse(RR[i] > 1.2 ,1,0)
+  }
+}
+
+
+# Data:
+Exp = data_ohio$Exp
+Obs = data_ohio$Obs
+N = 88
+
+ohio_model_data = list('Exp','Obs','N')
+
+# INITIAL VALUES
+inits1 <- list( 'alph' =0.9, 'b0' = 0.005) # chain 1
+inits2 <- list('alph' = 1.1, 'b0' = 0.004) # chain 2 
+int_ohio_par <- list(inits1,inits2)
+
+#PARAMETERS OF INTREST
+param <- c('RR','alph','b0','mu')
+
+
+# MODEL
+ohio_model_pd  <-  jags(data = ohio_model_data,
+                inits = int_ohio_par,
+                n.iter = 10000,
+                parameters.to.save = param,
+                model.file = ohio_Mortality_pd,
+                n.burnin = 500,
+                n.chains=2,n.thin=1)
+
+# PRIORS CHANGED
+ohio_model_pd$BUGSoutput$summary[89:90,]
+#SAME PRIOR
+ohio_model$BUGSoutput$summary[89:90,]
+
+
+
+# PLOTING THE RR FOR DIFFRENT PRIORS
+
+RR_posterior_pd = ohio_model_pd$BUGSoutput$summary[1:88,1]
+
+source("OhioMap.R")
+# need to read in the OhioMap function
+#map.text("county","ohio")
+OhioMap(RR_posterior,ncol=8,type="e",figmain="Ohio Relative Risk Posterior Plot",lower=0,upper=1.5)
+OhioMap(RR_posterior_pd,ncol=8,type="e",figmain="Ohio Relative Risk Posterior Plot with changed prior",lower=0,upper=1.5)
+```
+
+To understand the effect of prior we provide 'beta zero' as an informative prior and 'alph' as a vague prior. In the original model, the prior 'beta zero' was a vauge prior and 'alph' was an informative prior. When the prior is vague the posterior would be proportional to the likelihood, therefore prior does not have any influence on the likelihood. This means when the prior is vague the posterior depends on the data and the prior provides equal weight for all data points.
+
+From the plot, we can see that when the priors are changed the Relative Risk (RR) map changes. We observe that 'RR' for each county has increased and almost uniform 'RR' is observed for all counties in Ohio than previously. This is because RR comes from theta which comes from the vague prior 'alph' which we changed to, As 'alph' is vague all the 'RR' for most of the county has equal weight and we observed almost uniform 'RR' in Ohio counties. As 'beta zero' was changed to informative prior with higher mean point estimate the RR increased in all counties. Therefore we can see that priors have a great effect on the model.
+
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+
+
+# DATA ANALYSIS:
+data_ohio_pm25 = read.csv("ohio_pm25.csv")
+summary(data_ohio_pm25) # 95 NA and a negative value for pm2.5 present is present in row 243,276
+miss_var_summary(data_ohio_pm25)
+
+```
+From the initial dataset analysis, it is observed that the dataset contains missing data. About 12.9% of the data is missing (95 data points). It is also observed that PM 2.5 particulate matter which is supposed to be positive has negative data points in some regions with the lowest recorded as -0.4.
+
+
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+# plot with regions of missing para
+
+ggplot(data_ohio_pm25) +
+ aes(x = as.Date(Date), weight = pm2.5) +
+ geom_bar(fill = "blue") +
+  labs(title = 'PM 2.5 Missing Data', y = 'Count', x = 'Date')+ 
+ theme_minimal()+
+  geom_vline(xintercept=c(as.Date('1988-04-06'),as.Date('1988-05-11')), colour = 'red')+
+  geom_vline(xintercept=c(as.Date('1989-08-14'),as.Date('1989-09-27')), colour = 'red')+
+  geom_vline(xintercept= as.Date('1988-06-18'), colour = 'red')+
+  geom_vline(xintercept=c(as.Date('1988-08-08'),as.Date('1988-08-12')), colour = 'red')+
+  geom_vline(xintercept=c(as.Date('1988-10-05'),as.Date('1988-10-09')), colour = 'red')+
+  geom_vline(xintercept=c(as.Date('1989-03-29'),as.Date('1989-04-01')), colour = 'red')
+  
+
+```
+The red lines in the plot illustrate the period of missing data.
+
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+
+# ANALYSISING OHIO DATA FOR 1988:
+
+
+# MODEL
+jags.mod.ohio <- function(){
+  # Observation model
+  for (i in 2 : N) {
+    Ohio[i] ~ dnorm(Y[i],tau.v)
+  }
+  Ohio[1] ~ dnorm(Y[1],tau.v)
+  tau.v ~ dgamma(1,0.01)
+  # System model
+  for(i in 2:N){
+    Y[i] ~ dnorm(Y[i-1],tau.w)
+  }
+  Y[1] ~ dnorm(6,0.001)
+  tau.w ~ dgamma(1,0.01)
+  sigma.w <- 1/sqrt(tau.w)
+}
+```
+The value of measured PM 2.5 for each day is a normal distribution with mean as the true value (Y) and precision tau.v indicating error in measurement. The true PM2.5 value (Y) for each day is correlated to the true value of PM2.5 of the previous day with some random precision tau.w which we consider as white noise.
+
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+
+#DATA:
+Ohio = data_ohio_pm25[1:366,]$pm2.5
+N = 366
+jags.data.ohio.pm <- list("Ohio","N")
+
+
+# Initial values:
+set.seed(123)
+initial_chain1 <- list(tau.v = 0.08, Y= runif(366,5.95,6.05),
+               tau.w = 0.049,Ohio = c(rep(NA,96),rep(6.269,36),
+                                      rep(NA,37),6.269,rep(NA,50),
+                                      rep(6.269,5),rep(NA,53),6.269,NA,
+                                      rep(6.269,3),rep(NA,83))) # chain 1  # explain na 
+
+initial_chain2 <- list(tau.v = 0.004, Y= runif(366,5.95,6.05),
+               tau.w = 0.01,Ohio = c(rep(NA,96),rep(5.6,36),
+                                      rep(NA,37),5.6,rep(NA,50),
+                                      rep(5.6,5),rep(NA,53),5.6,NA,
+                                      rep(5.6,3),rep(NA,83))) # chain 2
+
+inital_values = list(initial_chain1,initial_chain2)
+
+# Param to save:
+
+ohio_param_save = c("Ohio","Y","tau.v","tau.w")
+
+# modeling:
+
+jags.mod.fit <- jags(data = jags.data.ohio.pm, inits = inital_values,
+                     parameters.to.save = ohio_param_save, n.chains = 2,
+                     n.iter = 10000,n.burnin = 5000,
+                     n.thin=1,model.file = jags.mod.ohio )
+
+
+
+```
+
+After building the model we provide initial values. As there are missing data points we need to provide initial values for these to predict them. For this, we initialize missing data in two chains with a mean(6.269) and median(5.6). We use two chains to see if they are converging properly. If the two chains have different behaviour they are not converged. We also provide initial values for the stochastic nodes 'tau. v', 'tau.w' and 'Y'. We also provide n.itter as 10,000 and n.burnin as 5,000. We provide n.burnin to give Markov chain time to reach its equilibrium distribution.
+
+
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+
+mcmc_ohio_pm2.5 = as.mcmc(jags.mod.fit)
+
+MCMCtrace(mcmc_ohio_pm2.5,
+          params = c('Y\\[108\\]','Y\\[123\\]','Y\\[352\\]',
+                  'Ohio\\[1\\]','Ohio\\[1\\]','Ohio\\[279\\]',
+                  'Ohio\\[118\\]','tau.v','tau.w'), # interest parameters
+          type = 'trace', # trace plot
+          ind = TRUE, # separate density lines for each chain
+          pdf = FALSE, ISB = FALSE,
+          exact=FALSE)
+
+MCMCtrace(mcmc_ohio_pm2.5,
+          params = c('Y\\[108\\]','Y\\[123\\]','Y\\[352\\]','Ohio\\[1\\]',
+                     'Ohio\\[1\\]','Ohio\\[279\\]','Ohio\\[118\\]',
+                     'tau.v','tau.w'), # interest parameters
+          type = 'density', # trace plot
+          ind = TRUE, # separate density lines for each chain
+          pdf = FALSE, ISB = FALSE,
+          exact=FALSE)
+#GELMAN
+gelman_df2 = gelman.diag(mcmc_ohio_pm2.5,multivariate = F)
+gelman_df2$psrf[c(2,113),]
+gelman_df2$psrf[c(23,24),]
+gelman_df2$psrf[200:201,]
+gelman_df2$psrf[380:381,]
+gelman_df2$psrf[651:652,]
+gelman_df2$psrf[734:735,]
+gelman_df2$psrf[368:369,]
+
+
+```
+
+
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+jags.mod.fit$BUGSoutput$summary[1:2,]
+jags.mod.fit$BUGSoutput$summary[118:119,] # missing data
+jags.mod.fit$BUGSoutput$summary[278:279,] # missing data
+
+jags.mod.fit$BUGSoutput$summary[474:475,]
+jags.mod.fit$BUGSoutput$summary[718:719,]
+
+jags.mod.fit$BUGSoutput$summary[734:735,]
+```
+
+From the trace plot, we observe the following. Most of the predicted 'Y' do not converge. Ohio[1] is a straight line as there is no missing value and is the value we input in the dataset therefore there is no deviance. Ohio[279] converges but ohio[118] does not converge well. This might be the effect of prior. Here 'Y' has very low precision it might be one of the reasons for not converging. Better priors might fix the non-convergence. Another way to fix is by increasing the n.burnin and n.iter. Increasing n.burnin will give more time for the Markov chain to reach a steady state.
+
+
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+
+
+Y_posterior_mu = jags.mod.fit$BUGSoutput$summary[367:732,1]
+CI_2.5 = jags.mod.fit$BUGSoutput$summary[367:732,3]
+CI_97.5 = jags.mod.fit$BUGSoutput$summary[367:732,7]
+
+
+plot_dataset = data.frame(Y_posterior_mu,CI_2.5,CI_97.5,
+                          date = as.Date(data_ohio_pm25$Date[1:366]),
+                          ORIG = data_ohio_pm25$pm2.5[1:366])
+
+
+ggplot(plot_dataset)+
+ geom_line(aes(x = date, y = Y_posterior_mu, colour = "predicted actual measurement"))+
+  geom_line(aes(x = date, y = ORIG, colour = 'recorded observation'))+
+  geom_line(aes(x = date, y = CI_2.5,colour = 'CI'),linetype = "dashed")+
+  geom_line(aes(x = date, y = CI_97.5), colour = 'red',linetype = "dashed")+
+  labs(title = 'Posterior mean and Original data', y = 'PM 2.5 measurement')
+
+```
+From the plot we observe very large credible interval in regions with missing data. This means great uncertainty in predicted Y measurement which is the actual PM2.5 without measurement error. We also can observe that the recorded observation follows along the actual measure with some variance which is considered random.
+
+&nbsp;
+
+To create a model which predicts the PM2.5 value for the 1st week of 1989 we need a modify the data set. This is done by adding 7 NAs after the year 1988. Then we provide initial values for these NA's the same way we did before while handling missing data. To get the RMSE between the predicted data and the original measured PM 2.5, we modify the model by adding the RMSE equation. This is then added to the list of parameters of interest to extract RMSE posterior distribution.
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+
+
+# MODEL
+set.seed(123)
+jags.mod.ohio_p1989 <- function(){
+  # Observation model
+  for (i in 2 : N) {
+    Ohio[i] ~ dnorm(Y[i],tau.v)
+  }
+  Ohio[1] ~ dnorm(Y[1],tau.v)
+  tau.v ~ dgamma(1,0.01)
+  # System model
+  for(i in 2:N){
+    Y[i] ~ dnorm(Y[i-1],tau.w)
+  }
+  Y[1] ~ dnorm(6,0.001)
+  tau.w ~ dgamma(1,0.01)
+  sigma.w <- 1/sqrt(tau.w)
+  RMSE <- sqrt((sum((Ohio[367:373]-org_ohio[367:373])^2))/7) 
+}
+
+     
+#DATA:
+N = 373
+org_ohio = data_ohio_pm25$pm2.5
+Ohio = c(data_ohio_pm25$pm2.5[1:366],rep(NA,7))
+
+#df_test = data.frame(withNA = Ohio,org_ohio[1:373], check = Ohio2)
+data.1989 <- list("Ohio","N","org_ohio")
+
+
+# initial value
+inits1989_1 <- list(tau.v = 0.08, Y= runif(373,5.95,6.05),
+               tau.w = 0.049,Ohio = c(rep(NA,96),rep(6.269,36),
+                                      rep(NA,37),6.269,rep(NA,50),
+                                      rep(6.269,5),rep(NA,53),6.269,NA,
+                                      rep(6.269,3),rep(NA,83),rep(6.269,7)))
+
+inits1989_2 <- list(tau.v = 0.004, Y= runif(373,5.95,6.05),
+               tau.w = 0.01,Ohio = c(rep(NA,96),rep(5.6,36),
+                                     rep(NA,37),5.6,rep(NA,50),
+                                     rep(5.6,5),rep(NA,53),5.6,NA,
+                                     rep(5.6,3),rep(NA,83),rep(5.6,7)))
+
+inital_val_1989 = list(inits1989_1,inits1989_2)
+
+# param of interest
+ohio_param_save = c("Ohio")
+
+#PREDICTION:
+jags.mod.p1989 <- jags(data = data.1989, inits = inital_val_1989,
+                     parameters.to.save = ohio_param_save, n.chains = 2,
+                     n.iter = 10000,n.burnin = 5000,
+                     n.thin=1,model.file = jags.mod.ohio_p1989 )
+
+jags.mod.p1989$BUGSoutput$summary[367:373,]
+```
+
+
+From the summary of the model, we get the point estimate mean of the posterior distributions and the credible intervals. We use this to plot a graph of the original measured and predicted PM 2.5.
+
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+
+# data set for plotting
+pred_ohio_dataset = data.frame(pred1 = jags.mod.p1989$BUGSoutput$summary[367:373,1],
+                               CI_2.5_p = jags.mod.p1989$BUGSoutput$summary[367:373,3],
+                               CI_97.5_p = jags.mod.p1989$BUGSoutput$summary[367:373,7],
+                               org = data_ohio_pm25[367:373,]$pm2.5,
+                               date = as.Date(data_ohio_pm25[367:373,]$Date))
+
+#PLOT
+ggplot(pred_ohio_dataset)+
+  geom_line(aes(x = date, y = pred1, colour = 'PREDICTED MEASURE'))+
+  geom_line(aes(x = date, y = org, colour = 'ACTUAL MEASURE'))+
+  geom_line(aes(x = date, y = CI_2.5_p, colour = ' CI'),linetype = "dashed")+
+  geom_line(aes(x = date, y = CI_97.5_p), colour = ' indianred1',linetype = "dashed")+
+  labs(title = "PM 2.5 first week of 1989", y = 'PM 2.5 measure', x = 'Date')+
+ theme_minimal()
+  
+
+```
+
+
+Even though the actual measured value deviates from the predicted value the plot shows that the prediction along with the credible interval captures the original measured PM 2.5. Therefore our model predicts well.
+
+
+
+```{r echo=TRUE,eval=TRUE,warning=FALSE,message=FALSE}
+
+#RMSE :
+ohio_param.RMSE = c('RMSE')
+
+
+jags.mod.p1989.RMSE <- jags(data = data.1989, inits = inital_val_1989,
+                     parameters.to.save = ohio_param.RMSE, n.chains = 2,
+                     n.iter = 10000,n.burnin = 5000,
+                     n.thin=1,model.file = jags.mod.ohio_p1989 )
+
+print(jags.mod.p1989.RMSE)
+
+```
